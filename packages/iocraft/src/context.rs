@@ -3,11 +3,15 @@ use core::{
     cell::{Ref, RefCell, RefMut},
     mem,
 };
+use std::sync::Mutex;
+
+pub(crate) type TerminalSuspension = Box<dyn FnOnce() + Send + 'static>;
 
 /// The system context, which is always available to all components.
 pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
+    terminal_suspensions: Mutex<Vec<TerminalSuspension>>,
 }
 
 impl SystemContext {
@@ -15,6 +19,7 @@ impl SystemContext {
         Self {
             should_exit: false,
             mouse_capture: None,
+            terminal_suspensions: Mutex::new(Vec::new()),
         }
     }
 
@@ -36,6 +41,26 @@ impl SystemContext {
 
     pub(crate) fn mouse_capture(&self) -> Option<bool> {
         self.mouse_capture
+    }
+
+    /// Temporarily restores the terminal, runs the given function, then resumes rendering.
+    ///
+    /// This can be used to run an interactive child process that needs exclusive access to the
+    /// terminal. The function runs after the current render pass, outside any synchronized
+    /// terminal update. When it returns, the terminal is configured for rendering again and the
+    /// interface is fully redrawn.
+    pub fn suspend_terminal<F>(&mut self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.terminal_suspensions
+            .get_mut()
+            .unwrap()
+            .push(Box::new(f));
+    }
+
+    pub(crate) fn take_terminal_suspensions(&mut self) -> Vec<TerminalSuspension> {
+        core::mem::take(self.terminal_suspensions.get_mut().unwrap())
     }
 }
 

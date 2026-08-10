@@ -508,6 +508,16 @@ impl<'a> Tree<'a> {
                     mouse_capture_enabled = Some(requested);
                 }
             }
+            let terminal_suspensions = self.system_context.take_terminal_suspensions();
+            if !terminal_suspensions.is_empty() {
+                term.suspend(Box::new(move || {
+                    for operation in terminal_suspensions {
+                        operation();
+                    }
+                }))?;
+                prev_canvas = None;
+                continue;
+            }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }
@@ -581,6 +591,10 @@ mod tests {
     use core::future::Future;
     use macro_rules_attribute::apply;
     use smol_macros::test;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[derive(Default, Props)]
     struct MyInnerComponentProps {
@@ -657,6 +671,46 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "input failed");
+    }
+
+    #[derive(Default, Props)]
+    struct SuspendTerminalProps {
+        operation_ran: Arc<AtomicBool>,
+    }
+
+    #[component]
+    fn SuspendTerminal(
+        mut hooks: Hooks,
+        props: &SuspendTerminalProps,
+    ) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut suspension_requested = hooks.use_state(|| false);
+        hooks.use_terminal_events(|_| {});
+
+        if suspension_requested.get() {
+            system.exit();
+        } else {
+            suspension_requested.set(true);
+            let operation_ran = props.operation_ran.clone();
+            system.suspend_terminal(move || operation_ran.store(true, Ordering::Relaxed));
+        }
+
+        element!(Text(content: "content"))
+    }
+
+    #[apply(test!)]
+    async fn test_terminal_suspension_runs_and_forces_redraw() {
+        let operation_ran = Arc::new(AtomicBool::new(false));
+        let canvases: Vec<_> = mock_terminal_render_loop(
+            &mut element!(SuspendTerminal(operation_ran: operation_ran.clone())),
+            MockTerminalConfig::default(),
+        )
+        .collect()
+        .await;
+
+        assert!(operation_ran.load(Ordering::Relaxed));
+        assert_eq!(canvases.len(), 2);
+        assert!(canvases[0] == canvases[1]);
     }
 
     #[component]

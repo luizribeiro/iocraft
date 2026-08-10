@@ -1,4 +1,4 @@
-use crate::{canvas::Canvas, element::Output};
+use crate::{canvas::Canvas, context::TerminalSuspension, element::Output};
 use crossterm::{
     cursor,
     event::{self, Event, EventStream},
@@ -143,6 +143,10 @@ trait TerminalImpl: Write + Send {
     fn set_mouse_capture(&mut self, _enabled: bool) -> io::Result<()> {
         Ok(())
     }
+    fn suspend(&mut self, operation: TerminalSuspension) -> io::Result<()> {
+        operation();
+        Ok(())
+    }
 
     fn is_raw_mode_enabled(&self) -> bool;
     fn clear_canvas(&mut self) -> io::Result<()>;
@@ -212,6 +216,29 @@ impl TerminalImpl for StdTerminal<'_> {
                     self.dest.execute(event::DisableMouseCapture)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn suspend(&mut self, operation: TerminalSuspension) -> io::Result<()> {
+        let raw_mode_enabled = self.raw_mode_enabled;
+        if raw_mode_enabled {
+            self.set_raw_mode_enabled(false)?;
+        }
+        if self.fullscreen {
+            self.dest.execute(terminal::LeaveAlternateScreen)?;
+        }
+        self.dest.execute(cursor::Show)?;
+        self.dest.flush()?;
+
+        operation();
+
+        self.dest.execute(cursor::Hide)?;
+        if self.fullscreen {
+            self.dest.execute(terminal::EnterAlternateScreen)?;
+        }
+        if raw_mode_enabled {
+            self.set_raw_mode_enabled(true)?;
         }
         Ok(())
     }
@@ -621,6 +648,15 @@ impl<'a> Terminal<'a> {
         self.inner.set_mouse_capture(false)
     }
 
+    pub(crate) fn suspend(&mut self, operation: TerminalSuspension) -> io::Result<()> {
+        let had_event_stream = self.event_stream.take().is_some();
+        self.inner.suspend(operation)?;
+        if had_event_stream {
+            self.event_stream = Some(self.inner.event_stream()?);
+        }
+        Ok(())
+    }
+
     pub fn ignore_ctrl_c(&mut self) {
         self.ignore_ctrl_c = true;
     }
@@ -791,7 +827,10 @@ mod tests {
     use super::*;
     use crate::prelude::*;
     use crossterm::QueueableCommand;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
 
     #[derive(Clone, Default)]
     struct TestWriter {
@@ -1025,6 +1064,32 @@ mod tests {
         assert_eq!(vt.line(1).text(), "          ");
         assert_eq!(vt.line(2).text(), "          ");
         assert_eq!(vt.line(3).text(), "          ");
+    }
+
+    #[test]
+    fn test_suspend_fullscreen_terminal() {
+        let (dest, output) = new_test_writer();
+        let mut term = new_fullscreen_term(dest, 0, 0);
+        let operation_ran = Arc::new(AtomicBool::new(false));
+        let operation_ran_from_suspension = operation_ran.clone();
+
+        term.suspend(Box::new(move || {
+            operation_ran_from_suspension.store(true, Ordering::Relaxed);
+        }))
+        .unwrap();
+
+        let mut expected = Vec::new();
+        expected
+            .queue(terminal::LeaveAlternateScreen)
+            .unwrap()
+            .queue(cursor::Show)
+            .unwrap()
+            .queue(cursor::Hide)
+            .unwrap()
+            .queue(terminal::EnterAlternateScreen)
+            .unwrap();
+        assert!(operation_ran.load(Ordering::Relaxed));
+        assert_eq!(*output.lock().unwrap(), expected);
     }
 
     fn new_fullscreen_term(
