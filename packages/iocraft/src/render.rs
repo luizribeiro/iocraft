@@ -106,6 +106,14 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
 
     /// Sets the layout style of the current component.
     pub fn set_layout_style(&mut self, layout_style: taffy::style::Style) {
+        let is_changed = self
+            .context
+            .layout_engine
+            .style(self.node_id)
+            .is_ok_and(|current| current != &layout_style);
+        if !is_changed {
+            return;
+        }
         self.context
             .layout_engine
             .set_style(self.node_id, layout_style)
@@ -200,10 +208,17 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                     used_components.push_back(child.key().clone(), component);
                 }
 
-                self.context
+                let children_changed = self
+                    .context
                     .layout_engine
-                    .set_children(self.node_id, &direct_child_node_ids)
-                    .expect("we should be able to set the children");
+                    .children(self.node_id)
+                    .is_ok_and(|children| children != direct_child_node_ids);
+                if children_changed {
+                    self.context
+                        .layout_engine
+                        .set_children(self.node_id, &direct_child_node_ids)
+                        .expect("we should be able to set the children");
+                }
 
                 for component in self.children.components.iter() {
                     self.context
@@ -399,25 +414,35 @@ impl<'a> Tree<'a> {
             );
             context.did_clear_terminal_output
         };
-        self.layout_engine
-            .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
-            .expect("we should be able to set the children");
+        let wrapper_children_changed = self
+            .layout_engine
+            .children(self.wrapper_node_id)
+            .is_ok_and(|children| children != wrapper_child_node_ids);
+        if wrapper_children_changed {
+            self.layout_engine
+                .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
+                .expect("we should be able to set the children");
+        }
 
         // Set wrapper max width for `width: 100pct` to work because available_space in
         // compute_layout_with_measure is not enough:
         if let Some(w) = max_width {
-            self.layout_engine
-                .set_style(
-                    self.wrapper_node_id,
-                    Style {
-                        size: Size {
-                            width: Dimension::Length(w as _),
-                            height: Dimension::Auto,
-                        },
-                        ..Default::default()
-                    },
-                )
-                .expect("we should be able to set the style");
+            let style = Style {
+                size: Size {
+                    width: Dimension::Length(w as _),
+                    height: Dimension::Auto,
+                },
+                ..Default::default()
+            };
+            let wrapper_style_changed = self
+                .layout_engine
+                .style(self.wrapper_node_id)
+                .is_ok_and(|current| current != &style);
+            if wrapper_style_changed {
+                self.layout_engine
+                    .set_style(self.wrapper_node_id, style)
+                    .expect("we should be able to set the style");
+            }
         }
 
         self.layout_engine
@@ -581,6 +606,10 @@ mod tests {
     use core::future::Future;
     use macro_rules_attribute::apply;
     use smol_macros::test;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[derive(Default, Props)]
     struct MyInnerComponentProps {
@@ -634,6 +663,91 @@ mod tests {
             "tick: 1\nrender count (a): 2\nrender count (b0): 2\nrender count (b1): 2\nrender count (c0): 2\nrender count (c1): 2\n",
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[derive(Default, Props)]
+    struct CountingMeasureProps {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct CountingMeasure {
+        initialized: bool,
+    }
+
+    impl Component for CountingMeasure {
+        type Props<'a> = CountingMeasureProps;
+
+        fn new(_props: &Self::Props<'_>) -> Self {
+            Self::default()
+        }
+
+        fn update(
+            &mut self,
+            props: &mut Self::Props<'_>,
+            _hooks: Hooks,
+            updater: &mut ComponentUpdater,
+        ) {
+            if self.initialized {
+                return;
+            }
+
+            self.initialized = true;
+            let calls = props.calls.clone();
+            updater.set_measure_func(Box::new(move |_, _, _| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                taffy::Size {
+                    width: 1.0,
+                    height: 1.0,
+                }
+            }));
+        }
+    }
+
+    #[derive(Default, Props)]
+    struct StableLayoutProps {
+        calls: Arc<AtomicUsize>,
+        calls_after_first_frame: Arc<AtomicUsize>,
+    }
+
+    #[component]
+    fn StableLayout(props: &StableLayoutProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0);
+        hooks.use_future(async move {
+            tick += 1;
+        });
+        if tick == 1 {
+            props
+                .calls_after_first_frame
+                .store(props.calls.load(Ordering::Relaxed), Ordering::Relaxed);
+            system.exit();
+        }
+
+        element! {
+            View(width: 10) {
+                CountingMeasure(calls: props.calls.clone())
+            }
+        }
+    }
+
+    #[apply(test!)]
+    async fn test_unchanged_layout_is_not_recomputed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_after_first_frame = Arc::new(AtomicUsize::new(0));
+        mock_terminal_render_loop(
+            &mut element!(StableLayout(
+                calls: calls.clone(),
+                calls_after_first_frame: calls_after_first_frame.clone(),
+            )),
+            MockTerminalConfig::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let first_frame = calls_after_first_frame.load(Ordering::Relaxed);
+        assert!(first_frame > 0);
+        assert_eq!(calls.load(Ordering::Relaxed), first_frame);
     }
 
     async fn await_send_future<F: Future<Output = io::Result<()>> + Send>(f: F) {
