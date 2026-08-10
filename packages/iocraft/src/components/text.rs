@@ -89,6 +89,14 @@ pub struct Text {
     wrap: TextWrap,
     align: TextAlign,
     hyperlink: Option<String>,
+    has_measure_func: bool,
+    draw_cache: Option<TextDrawCache>,
+}
+
+struct TextDrawCache {
+    width: usize,
+    x_offset: isize,
+    content: String,
 }
 
 impl Text {
@@ -266,24 +274,60 @@ impl Component for Text {
             italic: props.italic,
             invert: props.invert,
         };
-        self.content = strip_ansi(&props.content).into_owned();
+        let content = strip_ansi(&props.content);
+        let content_changed = content != self.content;
+        let wrap_changed = props.wrap != self.wrap;
+        let align_changed = props.align != self.align;
+        if content_changed {
+            self.content = content.into_owned();
+        }
+        if content_changed || wrap_changed || align_changed {
+            self.draw_cache = None;
+        }
         self.wrap = props.wrap;
         self.align = props.align;
         self.hyperlink = props.hyperlink.clone();
-        updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
+        if !self.has_measure_func || content_changed || wrap_changed {
+            updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
+            self.has_measure_func = true;
+        }
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
-        let width = drawer.layout().size.width;
-        let content = Self::wrap(
-            &self.content,
-            self.wrap,
-            None,
-            AvailableSpace::Definite(width),
+        let width = drawer.layout().size.width as usize;
+        if self
+            .draw_cache
+            .as_ref()
+            .is_none_or(|cache| cache.width != width)
+        {
+            let content = Self::wrap(
+                &self.content,
+                self.wrap,
+                None,
+                AvailableSpace::Definite(width as f32),
+            );
+            let (x_offset, content) = Self::align(content, self.align, width);
+            self.draw_cache = Some(TextDrawCache {
+                width,
+                x_offset,
+                content,
+            });
+        }
+
+        let visible = drawer.visible_y_range();
+        let cache = self.draw_cache.as_ref().unwrap();
+        let mut text_drawer =
+            TextDrawer::new(drawer, cache.x_offset, self.align != TextAlign::Left);
+        text_drawer.y = visible.start as isize;
+        text_drawer.append_lines(
+            cache
+                .content
+                .lines()
+                .skip(visible.start)
+                .take(visible.len()),
+            self.style,
+            self.hyperlink.as_deref(),
         );
-        let (x_offset, content) = Self::align(content, self.align, width as _);
-        let mut drawer = TextDrawer::new(drawer, x_offset, self.align != TextAlign::Left);
-        drawer.append_lines(content.lines(), self.style, self.hyperlink.as_deref());
     }
 }
 

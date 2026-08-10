@@ -286,6 +286,14 @@ impl ComponentDrawer<'_> {
         )
     }
 
+    pub(crate) fn visible_y_range(&self) -> core::ops::Range<usize> {
+        let node_top = i32::from(self.node_position.y);
+        let node_height = i32::from(self.node_size.height);
+        let start = (i32::from(self.clip_rect.top) - node_top).clamp(0, node_height);
+        let end = (i32::from(self.clip_rect.bottom) - node_top).clamp(start, node_height);
+        start as usize..end as usize
+    }
+
     /// Prepares to begin drawing a node by moving to the node's position and invoking the given
     /// closure.
     pub(crate) fn for_child_node_layout<F>(&mut self, node_id: NodeId, f: F)
