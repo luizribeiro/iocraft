@@ -85,6 +85,10 @@ pub enum TerminalEvent {
     FullscreenMouse(FullscreenMouseEvent),
     /// A resize event, fired when the terminal is resized.
     Resize(u16, u16),
+    /// Fired when the terminal gains focus.
+    FocusGained,
+    /// Fired when the terminal loses focus.
+    FocusLost,
 }
 
 struct TerminalEventsInner {
@@ -108,6 +112,26 @@ impl Stream for TerminalEvents {
             inner.waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+
+fn map_terminal_event(event: Event) -> Option<TerminalEvent> {
+    match event {
+        Event::Key(event) => Some(TerminalEvent::Key(KeyEvent {
+            code: event.code,
+            modifiers: event.modifiers,
+            kind: event.kind,
+        })),
+        Event::Mouse(event) => Some(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+            modifiers: event.modifiers,
+            column: event.column,
+            row: event.row,
+            kind: event.kind,
+        })),
+        Event::Resize(width, height) => Some(TerminalEvent::Resize(width, height)),
+        Event::FocusGained => Some(TerminalEvent::FocusGained),
+        Event::FocusLost => Some(TerminalEvent::FocusLost),
+        _ => None,
     }
 }
 
@@ -364,24 +388,8 @@ impl TerminalImpl for StdTerminal<'_> {
         Ok(EventStream::new()
             .filter_map(|event| async move {
                 match event {
-                    Ok(Event::Key(event)) => Some(Ok(TerminalEvent::Key(KeyEvent {
-                        code: event.code,
-                        modifiers: event.modifiers,
-                        kind: event.kind,
-                    }))),
-                    Ok(Event::Mouse(event)) => {
-                        Some(Ok(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
-                            modifiers: event.modifiers,
-                            column: event.column,
-                            row: event.row,
-                            kind: event.kind,
-                        })))
-                    }
-                    Ok(Event::Resize(width, height)) => {
-                        Some(Ok(TerminalEvent::Resize(width, height)))
-                    }
+                    Ok(event) => map_terminal_event(event).map(Ok),
                     // Ignore crossterm events that iocraft does not expose.
-                    Ok(_) => None,
                     Err(error) => Some(Err(error)),
                 }
             })
@@ -443,9 +451,11 @@ impl<'a> StdTerminal<'a> {
                 if self.mouse_capture {
                     self.dest.execute(event::EnableMouseCapture)?;
                 }
+                self.dest.execute(event::EnableFocusChange)?;
                 terminal::enable_raw_mode()?;
             } else {
                 terminal::disable_raw_mode()?;
+                self.dest.execute(event::DisableFocusChange)?;
                 if self.mouse_capture {
                     self.dest.execute(event::DisableMouseCapture)?;
                 }
@@ -803,6 +813,18 @@ mod tests {
         let writer = TestWriter::default();
         let buf = writer.buf.clone();
         (writer, buf)
+    }
+
+    #[test]
+    fn test_map_terminal_focus_events() {
+        assert!(matches!(
+            map_terminal_event(Event::FocusGained),
+            Some(TerminalEvent::FocusGained)
+        ));
+        assert!(matches!(
+            map_terminal_event(Event::FocusLost),
+            Some(TerminalEvent::FocusLost)
+        ));
     }
 
     #[test]

@@ -168,7 +168,10 @@ impl Hook for UseTerminalEventsImpl {
                             }
                         }
                     }
-                    TerminalEvent::Key(_) | TerminalEvent::Resize(..) => {
+                    TerminalEvent::Key(_)
+                    | TerminalEvent::Resize(..)
+                    | TerminalEvent::FocusGained
+                    | TerminalEvent::FocusLost => {
                         if let Some(f) = &mut self.f {
                             f(event);
                         }
