@@ -169,6 +169,7 @@ impl Hook for UseTerminalEventsImpl {
                         }
                     }
                     TerminalEvent::Key(_)
+                    | TerminalEvent::Paste(_)
                     | TerminalEvent::Resize(..)
                     | TerminalEvent::FocusGained
                     | TerminalEvent::FocusLost => {

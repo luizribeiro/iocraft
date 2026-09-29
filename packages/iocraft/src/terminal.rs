@@ -81,6 +81,8 @@ impl FullscreenMouseEvent {
 pub enum TerminalEvent {
     /// A key event, fired when a key is pressed.
     Key(KeyEvent),
+    /// A paste event containing the pasted text.
+    Paste(String),
     /// A mouse event, fired when the mouse is moved, clicked, scrolled, etc. in fullscreen mode.
     FullscreenMouse(FullscreenMouseEvent),
     /// A resize event, fired when the terminal is resized.
@@ -116,12 +118,15 @@ impl Stream for TerminalEvents {
 }
 
 fn map_terminal_event(event: Event) -> Option<TerminalEvent> {
+    // Crossterm marks Event non-exhaustive even though this version's variants are all covered.
+    #[allow(unreachable_patterns)]
     match event {
         Event::Key(event) => Some(TerminalEvent::Key(KeyEvent {
             code: event.code,
             modifiers: event.modifiers,
             kind: event.kind,
         })),
+        Event::Paste(text) => Some(TerminalEvent::Paste(text)),
         Event::Mouse(event) => Some(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
             modifiers: event.modifiers,
             column: event.column,
@@ -469,28 +474,40 @@ impl<'a> StdTerminal<'a> {
     fn set_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
         if raw_mode_enabled != self.raw_mode_enabled {
             if raw_mode_enabled {
-                if self.supports_keyboard_enhancement {
-                    self.dest.execute(event::PushKeyboardEnhancementFlags(
-                        event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-                    ))?;
-                    self.enabled_keyboard_enhancement = true;
-                }
-                if self.mouse_capture {
-                    self.dest.execute(event::EnableMouseCapture)?;
-                }
-                self.dest.execute(event::EnableFocusChange)?;
+                self.enable_event_modes()?;
                 terminal::enable_raw_mode()?;
             } else {
                 terminal::disable_raw_mode()?;
-                self.dest.execute(event::DisableFocusChange)?;
-                if self.mouse_capture {
-                    self.dest.execute(event::DisableMouseCapture)?;
-                }
-                if self.enabled_keyboard_enhancement {
-                    self.dest.execute(event::PopKeyboardEnhancementFlags)?;
-                }
+                self.disable_event_modes()?;
             }
             self.raw_mode_enabled = raw_mode_enabled;
+        }
+        Ok(())
+    }
+
+    fn enable_event_modes(&mut self) -> io::Result<()> {
+        if self.supports_keyboard_enhancement {
+            self.dest.execute(event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            ))?;
+            self.enabled_keyboard_enhancement = true;
+        }
+        if self.mouse_capture {
+            self.dest.execute(event::EnableMouseCapture)?;
+        }
+        self.dest.execute(event::EnableFocusChange)?;
+        self.dest.execute(event::EnableBracketedPaste)?;
+        Ok(())
+    }
+
+    fn disable_event_modes(&mut self) -> io::Result<()> {
+        self.dest.execute(event::DisableBracketedPaste)?;
+        self.dest.execute(event::DisableFocusChange)?;
+        if self.mouse_capture {
+            self.dest.execute(event::DisableMouseCapture)?;
+        }
+        if self.enabled_keyboard_enhancement {
+            self.dest.execute(event::PopKeyboardEnhancementFlags)?;
         }
         Ok(())
     }
@@ -864,6 +881,35 @@ mod tests {
             map_terminal_event(Event::FocusLost),
             Some(TerminalEvent::FocusLost)
         ));
+    }
+
+    #[test]
+    fn test_map_terminal_paste_event() {
+        assert!(matches!(
+            map_terminal_event(Event::Paste("pasted text".to_owned())),
+            Some(TerminalEvent::Paste(text)) if text == "pasted text"
+        ));
+    }
+
+    #[test]
+    fn raw_mode_pairs_bracketed_paste_sequences() {
+        let (dest, output) = new_test_writer();
+        let mut term = new_inline_term(dest, 0);
+
+        term.enable_event_modes().unwrap();
+        term.disable_event_modes().unwrap();
+
+        let mut expected = Vec::new();
+        expected
+            .execute(event::EnableFocusChange)
+            .unwrap()
+            .execute(event::EnableBracketedPaste)
+            .unwrap()
+            .execute(event::DisableBracketedPaste)
+            .unwrap()
+            .execute(event::DisableFocusChange)
+            .unwrap();
+        assert_eq!(*output.lock().unwrap(), expected);
     }
 
     #[test]

@@ -554,6 +554,12 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                         vertical_movement_col_preference.set(None);
                     }
                 }
+                TerminalEvent::Paste(text) => {
+                    value.insert_str(temp_cursor_offset, &text);
+                    temp_cursor_offset += text.len();
+                    on_change(value.clone());
+                    vertical_movement_col_preference.set(None);
+                }
                 _ => {}
             }
         }
@@ -633,6 +639,7 @@ mod tests {
     use futures::stream::StreamExt;
     use macro_rules_attribute::apply;
     use smol_macros::test;
+    use std::sync::Mutex;
 
     #[derive(Default, Props)]
     struct MyComponentProps {
@@ -680,6 +687,33 @@ mod tests {
         }
     }
 
+    #[derive(Default, Props)]
+    struct PasteCaptureProps {
+        captured: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[component]
+    fn PasteCapture(mut hooks: Hooks, props: &PasteCaptureProps) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut value = hooks.use_state(String::new);
+        let captured = props.captured.clone();
+
+        if value.read().contains('!') {
+            system.exit();
+        }
+
+        element! {
+            TextInput(
+                has_focus: true,
+                value: value.to_string(),
+                on_change: move |new_value: String| {
+                    captured.lock().unwrap().push(new_value.clone());
+                    value.set(new_value);
+                },
+            )
+        }
+    }
+
     #[apply(test!)]
     async fn test_text_input() {
         let actual = element!(MyComponent)
@@ -717,6 +751,21 @@ mod tests {
         .await;
         let expected = vec![" foo \n", " foo! \n"];
         assert_eq!(actual, expected);
+    }
+
+    #[apply(test!)]
+    async fn test_text_input_inserts_multiline_paste() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let _ = element! {
+            PasteCapture(captured: captured.clone())
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter([
+            TerminalEvent::Paste("first\nsecond!".to_owned()),
+        ])))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert_eq!(*captured.lock().unwrap(), ["first\nsecond!"]);
     }
 
     #[apply(test!)]
