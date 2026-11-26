@@ -3,6 +3,7 @@ use crate::{
     components::View,
     element,
     hooks::{Ref, State, UseRef, UseState, UseTerminalEvents},
+    render::LastLayoutStyle,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater,
     FlexDirection, Hook, Hooks, JustifyContent, KeyCode, KeyEvent, KeyEventKind, MouseEventKind,
     Overflow, Position, Props, TerminalEvent,
@@ -178,6 +179,7 @@ struct ScrollViewScrollbar {
     scroll_offset: i32,
     thumb_color: Option<Color>,
     track_color: Option<Color>,
+    layout_style: LastLayoutStyle,
 }
 
 impl Component for ScrollViewScrollbar {
@@ -199,13 +201,16 @@ impl Component for ScrollViewScrollbar {
         self.thumb_color = props.thumb_color;
         self.track_color = props.track_color;
 
-        updater.set_layout_style(taffy::style::Style {
-            size: taffy::geometry::Size {
-                width: taffy::style::Dimension::Length(1.0),
-                height: taffy::style::Dimension::Percent(1.0),
+        self.layout_style.set(
+            updater,
+            taffy::style::Style {
+                size: taffy::geometry::Size {
+                    width: taffy::style::Dimension::Length(1.0),
+                    height: taffy::style::Dimension::Percent(1.0),
+                },
+                ..Default::default()
             },
-            ..Default::default()
-        });
+        );
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {

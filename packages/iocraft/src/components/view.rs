@@ -1,6 +1,6 @@
 use crate::{
-    AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, Edges, Hooks,
-    Props,
+    render::LastLayoutStyle, AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer,
+    ComponentUpdater, Edges, Hooks, Props,
 };
 use iocraft_macros::with_layout_style_props;
 use taffy::{LengthPercentage, Rect};
@@ -176,6 +176,7 @@ pub struct View {
     border_text_style: CanvasTextStyle,
     border_edges: Edges,
     background_color: Option<Color>,
+    layout_style: LastLayoutStyle,
 }
 
 impl Component for View {
@@ -225,7 +226,7 @@ impl Component for View {
                 }),
             }
         };
-        updater.set_layout_style(style);
+        self.layout_style.set(updater, style);
         updater.update_children(props.children.iter_mut(), None);
     }
 

@@ -387,6 +387,18 @@ fn set_children_if_changed(layout_engine: &mut LayoutEngine, node_id: NodeId, ch
         .expect("we should be able to set the children");
 }
 
+#[derive(Default)]
+pub(crate) struct LastLayoutStyle(Option<Style>);
+
+impl LastLayoutStyle {
+    pub(crate) fn set(&mut self, updater: &mut ComponentUpdater, style: Style) {
+        if self.0.as_ref() != Some(&style) {
+            updater.set_layout_style(style.clone());
+            self.0 = Some(style);
+        }
+    }
+}
+
 struct Tree<'a> {
     layout_engine: LayoutEngine,
     wrapper_node_id: NodeId,
@@ -418,11 +430,7 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn render(
-        &mut self,
-        max_width: Option<usize>,
-        terminal: Option<&mut Terminal<'_>>,
-    ) -> RenderOutput {
+    fn update(&mut self, max_width: Option<usize>, terminal: Option<&mut Terminal<'_>>) -> bool {
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
         let did_clear_terminal_output = {
             let mut context = UpdateContext {
@@ -460,6 +468,15 @@ impl<'a> Tree<'a> {
                 },
             );
         }
+        did_clear_terminal_output
+    }
+
+    fn render(
+        &mut self,
+        max_width: Option<usize>,
+        terminal: Option<&mut Terminal<'_>>,
+    ) -> RenderOutput {
+        let did_clear_terminal_output = self.update(max_width, terminal);
 
         self.layout_engine
             .compute_layout_with_measure(
@@ -767,6 +784,26 @@ mod tests {
             canvases,
             ["abc\n", "a\nb\nc\n", "c\nb\na\n", "c\na\n", "a\n"]
         );
+    }
+
+    fn assert_unchanged_update_does_not_invalidate_layout(mut element: impl ElementExt) {
+        let helper = element.helper();
+        let mut tree = Tree::new(element.props_mut(), helper);
+        tree.render(Some(20), None);
+        tree.update(Some(20), None);
+        assert!(!tree.layout_engine.dirty(tree.wrapper_node_id).unwrap());
+    }
+
+    #[test]
+    fn test_unchanged_update_of_views_does_not_invalidate_layout() {
+        assert_unchanged_update_does_not_invalidate_layout(element! {
+            View(width: 10, flex_direction: FlexDirection::Column) {
+                View(border_style: BorderStyle::Round) {
+                    Text(content: "hello world", wrap: TextWrap::Wrap)
+                    View(flex_grow: 1.0)
+                }
+            }
+        });
     }
 
     fn computed_layout_engine() -> (LayoutEngine, NodeId, NodeId) {
