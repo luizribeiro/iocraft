@@ -244,6 +244,17 @@ impl<'a> Terminal<'a> {
         self.inner.set_fullscreen(enabled)
     }
 
+    pub fn suspend<F: FnOnce()>(&mut self, f: F) -> io::Result<()> {
+        let had_event_stream = self.event_stream.take().is_some();
+        let suspension = Suspension::begin(&mut *self.inner)?;
+        f();
+        suspension.finish()?;
+        if had_event_stream {
+            self.event_stream = Some(self.inner.event_stream()?);
+        }
+        Ok(())
+    }
+
     pub fn ignore_ctrl_c(&mut self) {
         self.ignore_ctrl_c = true;
     }
@@ -381,6 +392,76 @@ impl Drop for SynchronizedUpdate<'_, '_> {
             let _ = inner.inner.end_frame();
         }
     }
+}
+
+/// Suspended terminal guard.
+/// Suspends the backend on creation, resumes it when dropped (even on error or panic).
+struct Suspension<'a, 'b> {
+    backend: Option<&'a mut (dyn TerminalBackend + 'b)>,
+}
+
+impl<'a, 'b> Suspension<'a, 'b> {
+    fn begin(backend: &'a mut (dyn TerminalBackend + 'b)) -> io::Result<Self> {
+        backend.suspend()?;
+        Ok(Self {
+            backend: Some(backend),
+        })
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.backend.take().unwrap().resume()
+    }
+}
+
+impl Drop for Suspension<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            let _ = backend.resume();
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn suspended_backend_is_resumed_after_panic() {
+    struct SuspendingBackend(Arc<Mutex<Vec<&'static str>>>);
+
+    impl TerminalBackend for SuspendingBackend {
+        fn clear_canvas(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_canvas(&mut self, _prev: Option<&Canvas>, _canvas: &Canvas) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn print_above(&mut self, _messages: &[Passthrough<'_>]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
+            self.0.lock().unwrap().push("event_stream");
+            Ok(stream::pending().boxed())
+        }
+
+        fn suspend(&mut self) -> io::Result<()> {
+            self.0.lock().unwrap().push("suspend");
+            Ok(())
+        }
+
+        fn resume(&mut self) -> io::Result<()> {
+            self.0.lock().unwrap().push("resume");
+            Ok(())
+        }
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut terminal = Terminal::with_backend(Box::new(SuspendingBackend(calls.clone())));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.suspend(|| panic!("editor crashed"))
+    }));
+    assert!(result.is_err());
+    assert_eq!(*calls.lock().unwrap(), ["suspend", "resume"]);
 }
 
 #[cfg(test)]
