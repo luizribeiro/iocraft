@@ -793,6 +793,20 @@ impl<'a> CrosstermBackend<'a> {
         Ok(term)
     }
 
+    /// Attempts every step even if an earlier one fails, returning the first error.
+    fn restore_terminal(&mut self) -> io::Result<()> {
+        let raw_mode = self.set_raw_mode_enabled(false);
+        let screen = if self.fullscreen {
+            self.dest.queue(terminal::LeaveAlternateScreen).map(|_| ())
+        } else if self.prev_canvas_height > 0 {
+            self.dest.write_all(b"\r\n")
+        } else {
+            Ok(())
+        };
+        let cursor = self.dest.execute(cursor::Show).map(|_| ());
+        raw_mode.and(screen).and(cursor)
+    }
+
     fn set_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
         if raw_mode_enabled != self.raw_mode_enabled {
             if raw_mode_enabled {
@@ -829,13 +843,7 @@ impl<'a> CrosstermBackend<'a> {
 
 impl Drop for CrosstermBackend<'_> {
     fn drop(&mut self) {
-        let _ = self.set_raw_mode_enabled(false);
-        if self.fullscreen {
-            let _ = self.dest.queue(terminal::LeaveAlternateScreen);
-        } else if self.prev_canvas_height > 0 {
-            let _ = self.dest.write_all(b"\r\n");
-        }
-        let _ = self.dest.execute(cursor::Show);
+        let _ = self.restore_terminal();
     }
 }
 
