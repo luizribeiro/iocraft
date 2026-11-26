@@ -198,12 +198,22 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                     used_components.push_back(child.key().clone(), component);
                 }
 
-                self.context
-                    .layout_engine
-                    .set_children(self.node_id, &direct_child_node_ids)
-                    .expect("we should be able to set the children");
+                set_children_if_changed(
+                    self.context.layout_engine,
+                    self.node_id,
+                    &direct_child_node_ids,
+                );
 
                 for component in self.children.components.iter() {
+                    // XXX: `remove` detaches the node from its parent without marking the parent
+                    // dirty. That parent belongs to an ancestor when this component is
+                    // transparent, so the ancestor won't see a changed child list either.
+                    if let Some(parent) = self.context.layout_engine.parent(component.node_id()) {
+                        self.context
+                            .layout_engine
+                            .mark_dirty(parent)
+                            .expect("we should be able to mark the node as dirty");
+                    }
                     self.context
                         .layout_engine
                         .remove(component.node_id())
@@ -351,6 +361,32 @@ pub(crate) struct LayoutEngineNodeContext {
 
 pub(crate) type LayoutEngine = TaffyTree<LayoutEngineNodeContext>;
 
+// Taffy marks nodes dirty on every `set_style` and `set_children` call, even when nothing
+// changed, which forces their layouts (and their ancestors') to be recomputed.
+fn set_style_if_changed(layout_engine: &mut LayoutEngine, node_id: NodeId, style: Style) {
+    if layout_engine
+        .style(node_id)
+        .is_ok_and(|current| *current == style)
+    {
+        return;
+    }
+    layout_engine
+        .set_style(node_id, style)
+        .expect("we should be able to set the style");
+}
+
+fn set_children_if_changed(layout_engine: &mut LayoutEngine, node_id: NodeId, children: &[NodeId]) {
+    if layout_engine
+        .children(node_id)
+        .is_ok_and(|current| current == children)
+    {
+        return;
+    }
+    layout_engine
+        .set_children(node_id, children)
+        .expect("we should be able to set the children");
+}
+
 struct Tree<'a> {
     layout_engine: LayoutEngine,
     wrapper_node_id: NodeId,
@@ -403,25 +439,26 @@ impl<'a> Tree<'a> {
             );
             context.did_clear_terminal_output
         };
-        self.layout_engine
-            .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
-            .expect("we should be able to set the children");
+        set_children_if_changed(
+            &mut self.layout_engine,
+            self.wrapper_node_id,
+            &wrapper_child_node_ids,
+        );
 
         // Set wrapper max width for `width: 100pct` to work because available_space in
         // compute_layout_with_measure is not enough:
         if let Some(w) = max_width {
-            self.layout_engine
-                .set_style(
-                    self.wrapper_node_id,
-                    Style {
-                        size: Size {
-                            width: Dimension::Length(w as _),
-                            height: Dimension::Auto,
-                        },
-                        ..Default::default()
+            set_style_if_changed(
+                &mut self.layout_engine,
+                self.wrapper_node_id,
+                Style {
+                    size: Size {
+                        width: Dimension::Length(w as _),
+                        height: Dimension::Auto,
                     },
-                )
-                .expect("we should be able to set the style");
+                    ..Default::default()
+                },
+            );
         }
 
         self.layout_engine
@@ -602,6 +639,10 @@ mod tests {
     use core::future::Future;
     use macro_rules_attribute::apply;
     use smol_macros::test;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[derive(Default, Props)]
     struct MyInnerComponentProps {
@@ -655,6 +696,123 @@ mod tests {
             "tick: 1\nrender count (a): 2\nrender count (b0): 2\nrender count (b1): 2\nrender count (c0): 2\nrender count (c1): 2\n",
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[derive(Default, Props)]
+    struct ConditionalChildProps {
+        show: Arc<AtomicBool>,
+    }
+
+    #[component]
+    fn ConditionalChild(props: &ConditionalChildProps) -> impl Into<AnyElement<'static>> {
+        let show = props.show.load(Ordering::Relaxed);
+        element! {
+            Fragment {
+                #(show.then(|| element!(Text(content: "hi"))))
+            }
+        }
+    }
+
+    #[test]
+    fn test_child_removed_under_transparent_component_is_relaid_out() {
+        let show = Arc::new(AtomicBool::new(true));
+        let mut element = element! {
+            View(flex_direction: FlexDirection::Column) {
+                ConditionalChild(show: show.clone())
+                Text(content: "tail")
+            }
+        };
+        let helper = element.helper();
+        let mut tree = Tree::new(element.props_mut(), helper);
+        assert_eq!(tree.render(None, None).canvas.to_string(), "hi\ntail\n");
+        show.store(false, Ordering::Relaxed);
+        assert_eq!(tree.render(None, None).canvas.to_string(), "tail\n");
+    }
+
+    #[derive(Default, Props)]
+    struct ChangingLayoutProps {
+        frame: Arc<AtomicUsize>,
+    }
+
+    #[component]
+    fn ChangingLayout(props: &ChangingLayoutProps) -> impl Into<AnyElement<'static>> {
+        let frame = props.frame.load(Ordering::Relaxed);
+        let items: &[&str] = match frame {
+            0 | 1 => &["a", "b", "c"],
+            2 => &["c", "b", "a"],
+            3 => &["c", "a"],
+            _ => &["a"],
+        };
+
+        element! {
+            View(width: if frame == 0 { 3 } else { 1 }, flex_wrap: FlexWrap::Wrap) {
+                #(items.iter().map(|item| element!(Text(key: *item, content: *item))))
+            }
+        }
+    }
+
+    #[test]
+    fn test_changed_layout_is_recomputed() {
+        let frame = Arc::new(AtomicUsize::new(0));
+        let mut element = element!(ChangingLayout(frame: frame.clone()));
+        let helper = element.helper();
+        let mut tree = Tree::new(element.props_mut(), helper);
+        let canvases: Vec<_> = (0..5)
+            .map(|i| {
+                frame.store(i, Ordering::Relaxed);
+                tree.render(None, None).canvas.to_string()
+            })
+            .collect();
+        assert_eq!(
+            canvases,
+            ["abc\n", "a\nb\nc\n", "c\nb\na\n", "c\na\n", "a\n"]
+        );
+    }
+
+    fn computed_layout_engine() -> (LayoutEngine, NodeId, NodeId) {
+        let mut layout_engine = LayoutEngine::new();
+        let child = layout_engine.new_leaf(Style::default()).unwrap();
+        let parent = layout_engine
+            .new_with_children(Style::default(), &[child])
+            .unwrap();
+        layout_engine
+            .compute_layout(
+                parent,
+                taffy::Size {
+                    width: AvailableSpace::MaxContent,
+                    height: AvailableSpace::MaxContent,
+                },
+            )
+            .unwrap();
+        (layout_engine, parent, child)
+    }
+
+    #[test]
+    fn test_set_style_if_changed() {
+        let (mut layout_engine, parent, child) = computed_layout_engine();
+        set_style_if_changed(&mut layout_engine, child, Style::default());
+        assert!(!layout_engine.dirty(child).unwrap());
+        assert!(!layout_engine.dirty(parent).unwrap());
+
+        let style = Style {
+            display: Display::None,
+            ..Default::default()
+        };
+        set_style_if_changed(&mut layout_engine, child, style.clone());
+        assert!(layout_engine.dirty(child).unwrap());
+        assert_eq!(*layout_engine.style(child).unwrap(), style);
+    }
+
+    #[test]
+    fn test_set_children_if_changed() {
+        let (mut layout_engine, parent, child) = computed_layout_engine();
+        set_children_if_changed(&mut layout_engine, parent, &[child]);
+        assert!(!layout_engine.dirty(parent).unwrap());
+
+        let other = layout_engine.new_leaf(Style::default()).unwrap();
+        set_children_if_changed(&mut layout_engine, parent, &[child, other]);
+        assert!(layout_engine.dirty(parent).unwrap());
+        assert_eq!(layout_engine.children(parent).unwrap(), [child, other]);
     }
 
     async fn await_send_future<F: Future<Output = io::Result<()>> + Send>(f: F) {
