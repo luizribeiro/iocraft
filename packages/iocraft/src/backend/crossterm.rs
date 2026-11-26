@@ -526,6 +526,23 @@ impl TerminalBackend for CrosstermBackend<'_> {
         Ok(())
     }
 
+    fn suspend(&mut self) -> io::Result<()> {
+        self.restore_terminal()?;
+        // Whatever runs while suspended moves the cursor, so the previous canvas can no longer be
+        // located or cleared.
+        self.prev_canvas_height = 0;
+        self.passthrough_appended_newline = None;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        self.dest.queue(cursor::Hide)?;
+        if self.fullscreen {
+            self.dest.queue(terminal::EnterAlternateScreen)?;
+        }
+        self.dest.flush()
+    }
+
     fn clear_canvas(&mut self) -> io::Result<()> {
         if self.prev_canvas_height == 0 {
             return Ok(());
@@ -1240,6 +1257,46 @@ mod tests {
         term.set_bracketed_paste(true).unwrap();
         let written = String::from_utf8(dest_buf.lock().unwrap().clone()).unwrap();
         assert!(written.is_empty(), "must not emit without raw mode");
+    }
+
+    #[test]
+    fn test_suspend_and_resume_fullscreen() {
+        let (dest, dest_buf) = new_test_writer();
+        let mut term = new_fullscreen_term(dest, 0, 5);
+
+        term.suspend().unwrap();
+        let mut expected = Vec::new();
+        expected
+            .queue(terminal::LeaveAlternateScreen)
+            .unwrap()
+            .queue(cursor::Show)
+            .unwrap();
+        assert_eq!(*dest_buf.lock().unwrap(), expected);
+        assert_eq!(term.prev_canvas_height, 0);
+
+        term.resume().unwrap();
+        expected
+            .queue(cursor::Hide)
+            .unwrap()
+            .queue(terminal::EnterAlternateScreen)
+            .unwrap();
+        assert_eq!(*dest_buf.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_suspend_and_resume_inline() {
+        let (dest, dest_buf) = new_test_writer();
+        let mut term = new_inline_term(dest, 3);
+
+        term.suspend().unwrap();
+        let mut expected = b"\r\n".to_vec();
+        expected.queue(cursor::Show).unwrap();
+        assert_eq!(*dest_buf.lock().unwrap(), expected);
+
+        term.resume().unwrap();
+        dest_buf.lock().unwrap().clear();
+        term.clear_canvas().unwrap();
+        assert!(dest_buf.lock().unwrap().is_empty());
     }
 
     fn render_canvas_to_vt(canvas: &Canvas, cols: usize, rows: usize) -> avt::Vt {

@@ -170,6 +170,23 @@ pub trait TerminalBackend: Send {
         Ok(())
     }
 
+    /// Returns the terminal to its normal state so that another program can use it, such as an
+    /// interactive editor. Paired with [`resume`](Self::resume).
+    ///
+    /// The input event stream is dropped before this is called. The default implementation is a
+    /// no-op. Backends that manage terminal modes must release them here to support handoff.
+    fn suspend(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Prepares the terminal for rendering again after [`suspend`](Self::suspend). The next
+    /// [`write_canvas`](Self::write_canvas) call has no previous canvas to diff against.
+    ///
+    /// The default implementation is a no-op.
+    fn resume(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Erases the previously rendered canvas from the display.
     fn clear_canvas(&mut self) -> io::Result<()>;
 
@@ -186,5 +203,7 @@ pub trait TerminalBackend: Send {
 
     /// Returns a stream of input events, enabling input (and, for terminal
     /// backends, raw mode) if it isn't already.
+    /// The render loop requests a fresh stream after resuming if it was reading input before
+    /// suspension.
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
 }
