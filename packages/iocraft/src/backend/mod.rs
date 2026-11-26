@@ -170,6 +170,24 @@ pub trait TerminalBackend: Send {
         Ok(())
     }
 
+    /// Returns the terminal to its normal state so that another program can use it, such as an
+    /// interactive editor. Paired with [`resume`](Self::resume).
+    ///
+    /// The input event stream is dropped before this is called and requested again via
+    /// [`event_stream`](Self::event_stream) after [`resume`](Self::resume). `resume` is called
+    /// even if the work done while suspended panics. The default implementation is a no-op.
+    fn suspend(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Prepares the terminal for rendering again after [`suspend`](Self::suspend). The next
+    /// [`write_canvas`](Self::write_canvas) call has no previous canvas to diff against.
+    ///
+    /// The default implementation is a no-op.
+    fn resume(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Erases the previously rendered canvas from the display.
     fn clear_canvas(&mut self) -> io::Result<()>;
 
