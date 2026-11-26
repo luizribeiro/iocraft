@@ -564,8 +564,18 @@ impl<'a> Tree<'a> {
                     mouse_capture_enabled = Some(requested);
                 }
             }
+            let suspension = self.system_context.take_terminal_suspension();
             if self.system_context.should_exit() || term.received_ctrl_c() {
+                drop(term);
+                if let Some(f) = suspension {
+                    f();
+                }
                 break;
+            }
+            if let Some(f) = suspension {
+                term.suspend(f)?;
+                prev_canvas = None;
+                continue;
             }
             if let Either::Right((result, _)) =
                 select(self.root_component.wait().boxed(), term.wait().boxed()).await
@@ -891,6 +901,70 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "input failed");
+    }
+
+    #[derive(Default, Props)]
+    struct SuspendOnceProps {
+        suspensions: Arc<AtomicUsize>,
+    }
+
+    #[component]
+    fn SuspendOnce(mut hooks: Hooks, props: &SuspendOnceProps) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut suspended = hooks.use_state(|| false);
+        hooks.use_terminal_events(|_| {});
+
+        if suspended.get() {
+            system.exit();
+        } else {
+            suspended.set(true);
+            let suspensions = props.suspensions.clone();
+            system.suspend_terminal(move || {
+                suspensions.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+
+        element!(Text(content: "content"))
+    }
+
+    #[apply(test!)]
+    async fn test_terminal_suspension_runs_once_and_redraws() {
+        let suspensions = Arc::new(AtomicUsize::new(0));
+        let canvases: Vec<_> = mock_terminal_render_loop(
+            &mut element!(SuspendOnce(suspensions: suspensions.clone())),
+            MockTerminalConfig::default(),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(suspensions.load(Ordering::Relaxed), 1);
+        let canvases: Vec<_> = canvases.iter().map(|c| c.to_string()).collect();
+        assert_eq!(canvases, ["content\n", "content\n"]);
+    }
+
+    #[component]
+    fn SuspendAndExit(hooks: Hooks, props: &SuspendOnceProps) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let suspensions = props.suspensions.clone();
+        system.suspend_terminal(move || {
+            suspensions.fetch_add(1, Ordering::Relaxed);
+        });
+        system.exit();
+        element!(Text(content: "content"))
+    }
+
+    #[apply(test!)]
+    async fn test_terminal_suspension_runs_when_exiting() {
+        let suspensions = Arc::new(AtomicUsize::new(0));
+        let canvases: Vec<_> = mock_terminal_render_loop(
+            &mut element!(SuspendAndExit(suspensions: suspensions.clone())),
+            MockTerminalConfig::default(),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(suspensions.load(Ordering::Relaxed), 1);
+        assert_eq!(canvases.len(), 1);
     }
 
     #[component]

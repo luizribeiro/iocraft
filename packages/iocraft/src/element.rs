@@ -836,6 +836,41 @@ mod tests {
             self.record("event_stream");
             Ok(stream::pending().boxed())
         }
+
+        fn suspend(&mut self) -> io::Result<()> {
+            self.record("suspend");
+            Ok(())
+        }
+
+        fn resume(&mut self) -> io::Result<()> {
+            self.record("resume");
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Props)]
+    struct SuspendingComponentProps {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        exit_immediately: bool,
+    }
+
+    #[component]
+    fn SuspendingComponent(
+        mut hooks: Hooks,
+        props: &SuspendingComponentProps,
+    ) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut suspended = hooks.use_state(|| false);
+        hooks.use_terminal_events(|_| {});
+        if suspended.get() || props.exit_immediately {
+            system.exit();
+        }
+        if !suspended.get() {
+            suspended.set(true);
+            let calls = props.calls.clone();
+            system.suspend_terminal(move || calls.lock().unwrap().push("suspended"));
+        }
+        element!(View)
     }
 
     #[component]
@@ -915,6 +950,52 @@ mod tests {
                 "missing backend call: {expected}"
             );
         }
+    }
+
+    #[test]
+    fn test_render_loop_suspends_custom_backend_between_frames() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            calls: calls.clone(),
+            canvases: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut element = element!(SuspendingComponent(calls: calls.clone()));
+
+        smol::block_on(element.render_loop().fullscreen().backend(backend)).unwrap();
+
+        let calls = calls.lock().unwrap();
+        let suspend = calls.iter().position(|&c| c == "suspend").unwrap();
+        assert_eq!(
+            &calls[suspend - 1..suspend + 4],
+            [
+                "end_frame",
+                "suspend",
+                "suspended",
+                "resume",
+                "event_stream"
+            ]
+        );
+        assert!(calls[suspend..].contains(&"write_canvas"));
+    }
+
+    #[test]
+    fn test_render_loop_runs_suspension_after_exit_without_suspending_backend() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            calls: calls.clone(),
+            canvases: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut element = element!(SuspendingComponent(
+            calls: calls.clone(),
+            exit_immediately: true,
+        ));
+
+        smol::block_on(element.render_loop().fullscreen().backend(backend)).unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.last(), Some(&"suspended"));
+        assert!(!calls.contains(&"suspend"));
+        assert!(!calls.contains(&"resume"));
     }
 
     #[test]

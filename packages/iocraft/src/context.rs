@@ -3,11 +3,16 @@ use core::{
     cell::{Ref, RefCell, RefMut},
     mem,
 };
+use std::sync::Mutex;
+
+type TerminalSuspension = Box<dyn FnOnce() + Send>;
 
 /// The system context, which is always available to all components.
 pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
+    // Only accessed through `&mut self`. The mutex is what makes `SystemContext` `Sync`.
+    terminal_suspensions: Mutex<Vec<TerminalSuspension>>,
 }
 
 impl SystemContext {
@@ -15,6 +20,7 @@ impl SystemContext {
         Self {
             should_exit: false,
             mouse_capture: None,
+            terminal_suspensions: Mutex::new(Vec::new()),
         }
     }
 
@@ -36,6 +42,30 @@ impl SystemContext {
 
     pub(crate) fn mouse_capture(&self) -> Option<bool> {
         self.mouse_capture
+    }
+
+    /// Temporarily returns the terminal to its normal state and runs `f`, such as to launch an
+    /// interactive editor.
+    ///
+    /// `f` runs after the current render pass, and rendering and input handling are paused until
+    /// it returns. The terminal is then set up for rendering again and fully redrawn. If the
+    /// render loop is exiting, `f` runs after the terminal has been restored instead.
+    ///
+    /// Each suspension causes another render pass, so call this in response to an event rather
+    /// than on every render. Outside of a terminal render loop, `f` is never run.
+    pub fn suspend_terminal<F>(&mut self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.terminal_suspensions
+            .get_mut()
+            .unwrap()
+            .push(Box::new(f));
+    }
+
+    pub(crate) fn take_terminal_suspension(&mut self) -> Option<impl FnOnce()> {
+        let suspensions = mem::take(self.terminal_suspensions.get_mut().unwrap());
+        (!suspensions.is_empty()).then_some(move || suspensions.into_iter().for_each(|f| f()))
     }
 }
 
