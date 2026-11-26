@@ -129,16 +129,14 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// layout purposes.
     pub fn set_transparent_layout(&mut self, transparent_layout: bool) {
         if transparent_layout && !self.transparent_layout {
-            self.context
-                .layout_engine
-                .set_style(
-                    self.node_id,
-                    Style {
-                        display: Display::None,
-                        ..Default::default()
-                    },
-                )
-                .expect("we should be able to set the style");
+            set_style_if_changed(
+                self.context.layout_engine,
+                self.node_id,
+                Style {
+                    display: Display::None,
+                    ..Default::default()
+                },
+            );
         }
         self.transparent_layout = transparent_layout;
     }
@@ -786,6 +784,11 @@ mod tests {
         );
     }
 
+    #[component]
+    fn TextInFunctionComponent() -> impl Into<AnyElement<'static>> {
+        element!(Text(content: "hello world", wrap: TextWrap::Wrap))
+    }
+
     fn assert_unchanged_update_does_not_invalidate_layout(mut element: impl ElementExt) {
         let helper = element.helper();
         let mut tree = Tree::new(element.props_mut(), helper);
@@ -801,6 +804,21 @@ mod tests {
                 View(border_style: BorderStyle::Round) {
                     Text(content: "hello world", wrap: TextWrap::Wrap)
                     View(flex_grow: 1.0)
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_unchanged_update_of_transparent_layouts_does_not_invalidate_layout() {
+        assert_unchanged_update_does_not_invalidate_layout(element! {
+            View(width: 10, flex_direction: FlexDirection::Column) {
+                View {
+                    TextInFunctionComponent
+                    View(flex_grow: 1.0)
+                }
+                Fragment {
+                    Text(content: "in a fragment")
                 }
             }
         });
