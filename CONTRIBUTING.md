@@ -18,9 +18,9 @@ If the feature is minor or quick to implement, you can feel free to open a pull 
 
 ## Benchmarks
 
-Run `cargo bench -p iocraft --bench scroll` to measure scrolling through
-synthetic transcripts of 50, 150, and 400 messages. The benchmark uses an
-in-memory terminal backend and times each scroll sequence after the initial frame.
+Run `cargo bench -p iocraft` to run the benchmarks. The scroll benchmark
+measures scrolling through synthetic transcripts of 50, 150, and 400 messages
+using an in-memory terminal backend. Timing starts after the initial frame.
 
 ## Changelogs
 
