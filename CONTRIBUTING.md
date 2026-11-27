@@ -19,8 +19,8 @@ If the feature is minor or quick to implement, you can feel free to open a pull 
 ## Benchmarks
 
 Run `cargo bench -p iocraft` to run the benchmarks. The scroll benchmark
-measures scrolling through synthetic transcripts of 50, 150, and 400 messages
-using an in-memory terminal backend. Timing starts after the initial frame.
+measures 20 wheel events in a synthetic 400-row transcript using iocraft's mock
+terminal. Timing starts after the initial frame.
 
 ## Changelogs
 
