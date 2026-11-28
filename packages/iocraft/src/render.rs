@@ -3,6 +3,7 @@ use crate::{
     component::{ComponentHelperExt, Components, InstantiatedComponent},
     context::{Context, ContextStack, SystemContext},
     element::ElementExt,
+    hooks::TerminalSuspensions,
     multimap::AppendOnlyMultimap,
     props::AnyProps,
     terminal::{MockTerminalConfig, MockTerminalOutputStream, Terminal, TerminalEvents},
@@ -17,7 +18,7 @@ use futures::{
     future::{poll_fn, select, Either, FutureExt, LocalBoxFuture},
     stream::{Stream, StreamExt},
 };
-use std::io;
+use std::{io, sync::Arc};
 use taffy::{
     AvailableSpace, Dimension, Display, Layout, NodeId, Overflow, Point, Rect, Size, Style,
     TaffyTree,
@@ -357,6 +358,7 @@ struct Tree<'a> {
     root_component: InstantiatedComponent,
     root_component_props: AnyProps<'a>,
     system_context: SystemContext,
+    suspensions: Option<Arc<TerminalSuspensions>>,
 }
 
 struct RenderOutput {
@@ -379,6 +381,7 @@ impl<'a> Tree<'a> {
             root_component: InstantiatedComponent::new(root_node_id, props.borrow(), helper),
             root_component_props: props,
             system_context: SystemContext::new(),
+            suspensions: None,
         }
     }
 
@@ -395,11 +398,16 @@ impl<'a> Tree<'a> {
                 did_clear_terminal_output: false,
             };
             let mut component_context_stack = ContextStack::root(&mut self.system_context);
-            self.root_component.update(
-                &mut context,
-                &mut wrapper_child_node_ids,
-                &mut component_context_stack,
-                self.root_component_props.borrow(),
+            component_context_stack.with_context(
+                self.suspensions.as_ref().map(Context::from_ref),
+                |stack| {
+                    self.root_component.update(
+                        &mut context,
+                        &mut wrapper_child_node_ids,
+                        stack,
+                        self.root_component_props.borrow(),
+                    );
+                },
             );
             context.did_clear_terminal_output
         };
@@ -483,6 +491,8 @@ impl<'a> Tree<'a> {
     }
 
     async fn terminal_render_loop(&mut self, mut term: Terminal<'_>) -> io::Result<()> {
+        let suspensions = Arc::new(TerminalSuspensions::default());
+        self.suspensions = Some(Arc::clone(&suspensions));
         let mut prev_canvas: Option<Canvas> = None;
         let mut mouse_capture_enabled: Option<bool> = None;
         loop {
@@ -515,10 +525,23 @@ impl<'a> Tree<'a> {
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }
-            if let Either::Right((result, _)) =
-                select(self.root_component.wait().boxed(), term.wait().boxed()).await
+            let suspension = match select(
+                suspensions.next().boxed(),
+                select(self.root_component.wait().boxed(), term.wait().boxed()),
+            )
+            .await
             {
-                result?;
+                Either::Left((callback, _)) => Some(callback),
+                Either::Right((Either::Right((result, _)), _)) => {
+                    result?;
+                    None
+                }
+                Either::Right((Either::Left(_), _)) => None,
+            };
+            if let Some(callback) = suspension {
+                term.suspend(callback)?;
+                prev_canvas = None;
+                continue;
             }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
@@ -714,6 +737,62 @@ mod tests {
             "key",
             "terminal input was never polled while the root stayed dirty"
         );
+    }
+
+    #[derive(Default, Props)]
+    struct EditOnKeyProps {
+        on_handoff: Handler<()>,
+    }
+
+    #[component]
+    fn EditOnKey(mut hooks: Hooks, props: &EditOnKeyProps) -> impl Into<AnyElement<'static>> {
+        let suspension = Arc::clone(&hooks.use_context::<Arc<TerminalSuspensions>>());
+        let mut should_exit = hooks.use_state(|| false);
+        let on_handoff = props.on_handoff.clone();
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(key) = event {
+                match key.code {
+                    KeyCode::Char('e') => {
+                        let on_handoff = on_handoff.clone();
+                        assert!(suspension.request(move || on_handoff(())));
+                        assert!(!suspension.request(|| panic!("duplicate editor launch")));
+                    }
+                    KeyCode::Char('q') => should_exit.set(true),
+                    _ => {}
+                }
+            }
+        });
+        if should_exit.get() {
+            hooks.use_context_mut::<SystemContext>().exit();
+        }
+        element!(Text(content: "Draft"))
+    }
+
+    #[apply(test!)]
+    async fn test_terminal_suspension_redraws_and_resumes_input() {
+        let (send_key, keys) = futures::channel::mpsc::unbounded();
+        let events = futures::stream::iter([TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Char('e'),
+        ))])
+        .chain(keys);
+        let mut app = element!(EditOnKey(on_handoff: move |()| {
+            send_key
+                .unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                    KeyEventKind::Press,
+                    KeyCode::Char('q'),
+                )))
+                .unwrap();
+        }));
+        let mut frames =
+            mock_terminal_render_loop(&mut app, MockTerminalConfig::with_events(events))
+                .map(|canvas| canvas.to_string());
+        let frames: Vec<_> = smol::future::or(frames.by_ref().collect(), async {
+            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+            panic!("render loop never received the quit key after terminal suspension");
+        })
+        .await;
+        assert_eq!(frames, ["Draft\n", "Draft\n"]);
     }
 
     #[component]
