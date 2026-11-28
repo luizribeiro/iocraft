@@ -289,46 +289,47 @@ impl<'a> Terminal<'a> {
     }
 
     pub async fn wait(&mut self) -> io::Result<()> {
-        match &mut self.event_stream {
-            Some(event_stream) => {
-                while let Some(event) = event_stream.next().await {
-                    let event = event?;
-                    if !self.ignore_ctrl_c {
-                        if let TerminalEvent::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            kind: KeyEventKind::Press,
-                            modifiers: KeyModifiers::CONTROL,
-                        }) = event
-                        {
-                            self.received_ctrl_c = true;
-                        }
-                        if self.received_ctrl_c {
-                            return Ok(());
-                        }
-                    }
-                    self.subscribers.retain(|subscriber| {
-                        if let Some(subscriber) = subscriber.upgrade() {
-                            let waker = {
-                                let mut subscriber = subscriber.lock().unwrap();
-                                subscriber.pending.push_back(event.clone());
-                                subscriber.waker.take()
-                            };
-                            if let Some(waker) = waker {
-                                waker.wake();
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                }
-                Err(io::Error::new(
+        while let Some(event_stream) = &mut self.event_stream {
+            let Some(event) = event_stream.next().await else {
+                return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "terminal event stream ended",
-                ))
+                ));
+            };
+            let event = event?;
+            if !self.ignore_ctrl_c {
+                if let TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    kind: KeyEventKind::Press,
+                    modifiers: KeyModifiers::CONTROL,
+                }) = event
+                {
+                    self.received_ctrl_c = true;
+                }
+                if self.received_ctrl_c {
+                    return Ok(());
+                }
             }
-            None => pending().await,
+            self.dispatch_event(event);
         }
+        pending().await
+    }
+
+    fn dispatch_event(&mut self, event: TerminalEvent) {
+        self.subscribers.retain(|subscriber| {
+            let Some(subscriber) = subscriber.upgrade() else {
+                return false;
+            };
+            let waker = {
+                let mut subscriber = subscriber.lock().unwrap();
+                subscriber.pending.push_back(event.clone());
+                subscriber.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            true
+        });
     }
 
     pub fn events(&mut self) -> io::Result<TerminalEvents> {
@@ -389,9 +390,12 @@ impl Drop for SynchronizedUpdate<'_, '_> {
 mod suspension_tests {
     use super::*;
 
+    #[derive(Default)]
     struct Backend {
         calls: Arc<Mutex<Vec<&'static str>>>,
         failure: &'static str,
+        reported_size: Arc<Mutex<Option<(u16, u16)>>>,
+        size: Option<(u16, u16)>,
     }
 
     struct InputStream(Arc<Mutex<Vec<&'static str>>>);
@@ -415,6 +419,14 @@ mod suspension_tests {
     }
 
     impl TerminalBackend for Backend {
+        fn refresh_size(&mut self) {
+            self.size = *self.reported_size.lock().unwrap();
+        }
+
+        fn size(&self) -> Option<(u16, u16)> {
+            self.size
+        }
+
         fn clear_canvas(&mut self) -> io::Result<()> {
             Ok(())
         }
@@ -451,7 +463,7 @@ mod suspension_tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut terminal = Terminal::with_backend(Box::new(Backend {
             calls: Arc::clone(&calls),
-            failure: "",
+            ..Backend::default()
         }));
         terminal.events().unwrap();
         assert_eq!(*calls.lock().unwrap(), ["events"]);
