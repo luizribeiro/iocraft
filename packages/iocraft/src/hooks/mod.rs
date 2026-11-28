@@ -64,6 +64,8 @@ mod use_terminal_size;
 pub use use_terminal_size::*;
 mod use_component_rect;
 pub use use_component_rect::*;
+mod use_terminal_suspension;
+pub use use_terminal_suspension::*;
 
 mod terminal_suspensions;
 pub(crate) use terminal_suspensions::TerminalSuspensions;

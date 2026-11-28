@@ -746,7 +746,7 @@ mod tests {
 
     #[component]
     fn EditOnKey(mut hooks: Hooks, props: &EditOnKeyProps) -> impl Into<AnyElement<'static>> {
-        let suspension = Arc::clone(&hooks.use_context::<Arc<TerminalSuspensions>>());
+        let suspension = hooks.use_terminal_suspension();
         let mut should_exit = hooks.use_state(|| false);
         let on_handoff = props.on_handoff.clone();
         hooks.use_terminal_events(move |event| {
@@ -754,8 +754,8 @@ mod tests {
                 match key.code {
                     KeyCode::Char('e') => {
                         let on_handoff = on_handoff.clone();
-                        assert!(suspension.request(move || on_handoff(())));
-                        assert!(!suspension.request(|| panic!("duplicate editor launch")));
+                        assert!(suspension.suspend_terminal(move || on_handoff(())));
+                        assert!(!suspension.suspend_terminal(|| panic!("duplicate editor launch")));
                     }
                     KeyCode::Char('q') => should_exit.set(true),
                     _ => {}

@@ -21,7 +21,6 @@ impl TerminalSuspensions {
         .await
     }
 
-    #[cfg(test)]
     pub(crate) fn request(&self, callback: impl FnOnce() + Send + 'static) -> bool {
         {
             let mut pending = self.pending.lock().unwrap();
