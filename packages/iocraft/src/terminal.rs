@@ -9,7 +9,6 @@ use futures::{
 use std::{
     collections::VecDeque,
     io::{self, Write},
-    mem,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{Context, Poll, Waker},
@@ -152,7 +151,7 @@ impl Default for MockTerminalConfig {
 }
 
 struct MockTerminal {
-    config: MockTerminalConfig,
+    events: Arc<Mutex<BoxStream<'static, TerminalEvent>>>,
     output: mpsc::UnboundedSender<Canvas>,
 }
 
@@ -162,7 +161,7 @@ impl MockTerminal {
         let output = MockTerminalOutputStream { inner: output_rx };
         (
             Self {
-                config,
+                events: Arc::new(Mutex::new(config.events.chain(stream::pending()).boxed())),
                 output: output_tx,
             },
             output,
@@ -186,9 +185,12 @@ impl TerminalBackend for MockTerminal {
     }
 
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
-        let mut events = stream::pending().boxed();
-        mem::swap(&mut events, &mut self.config.events);
-        Ok(events.map(Ok).chain(stream::pending()).boxed())
+        let events = Arc::clone(&self.events);
+        Ok(
+            stream::poll_fn(move |cx| events.lock().unwrap().poll_next_unpin(cx))
+                .map(Ok)
+                .boxed(),
+        )
     }
 }
 
@@ -381,6 +383,92 @@ impl Drop for SynchronizedUpdate<'_, '_> {
             let _ = inner.inner.end_frame();
         }
     }
+}
+
+#[cfg(test)]
+mod suspension_tests {
+    use super::*;
+
+    struct Backend {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        failure: &'static str,
+    }
+
+    struct InputStream(Arc<Mutex<Vec<&'static str>>>);
+    impl Drop for InputStream {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("drop input");
+        }
+    }
+
+    impl Backend {
+        fn call(&self, method: &'static str) -> io::Result<()> {
+            let mut calls = self.calls.lock().unwrap();
+            let fails = self.failure == method && !calls.is_empty();
+            calls.push(method);
+            if fails {
+                Err(io::Error::other(method))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl TerminalBackend for Backend {
+        fn clear_canvas(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_canvas(&mut self, _: Option<&Canvas>, _: &Canvas) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn print_above(&mut self, _: &[Passthrough<'_>]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
+            self.call("events")?;
+            let input = InputStream(Arc::clone(&self.calls));
+            Ok(stream::poll_fn(move |_| {
+                let _input = &input;
+                Poll::Pending
+            })
+            .boxed())
+        }
+
+        fn suspend(&mut self) -> io::Result<()> {
+            self.call("suspend")
+        }
+
+        fn resume(&mut self) -> io::Result<()> {
+            self.call("resume")
+        }
+    }
+
+    #[test]
+    fn terminal_owns_its_input_stream() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = Terminal::with_backend(Box::new(Backend {
+            calls: Arc::clone(&calls),
+            failure: "",
+        }));
+        terminal.events().unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["events"]);
+        drop(terminal);
+        assert_eq!(*calls.lock().unwrap(), ["events", "drop input"]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn mock_events_survive_reopening_input() {
+    let input = stream::iter([TerminalEvent::Resize(80, 24)]);
+    let (mut mock, _) = MockTerminal::new(MockTerminalConfig::with_events(input));
+    drop(mock.event_stream().unwrap());
+    let mut events = mock.event_stream().unwrap();
+    let event = futures::FutureExt::now_or_never(events.next());
+    assert!(event.unwrap().unwrap().is_ok());
 }
 
 #[cfg(test)]
