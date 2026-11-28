@@ -795,6 +795,77 @@ mod tests {
         assert_eq!(frames, ["Draft\n", "Draft\n"]);
     }
 
+    #[derive(Default, Props)]
+    struct CaptureSuspensionProps {
+        handle: Arc<std::sync::Mutex<Option<TerminalSuspensionHandle>>>,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[component]
+    fn CaptureSuspension(
+        hooks: Hooks,
+        props: &CaptureSuspensionProps,
+    ) -> impl Into<AnyElement<'static>> {
+        *props.handle.lock().unwrap() = Some(hooks.use_terminal_suspension());
+        if props.closed.load(std::sync::atomic::Ordering::Relaxed) {
+            hooks.use_context_mut::<SystemContext>().exit();
+        }
+        element!(Text(content: "Draft"))
+    }
+
+    #[test]
+    fn test_terminal_suspension_wakes_an_idle_render_loop() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering::Relaxed},
+            task::{Context, Wake, Waker},
+        };
+
+        #[derive(Default)]
+        struct WakeFlag(AtomicBool);
+
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Relaxed);
+            }
+        }
+
+        let handle = Arc::default();
+        let closed = Arc::default();
+        let mut app =
+            element!(CaptureSuspension(handle: Arc::clone(&handle), closed: Arc::clone(&closed)));
+        assert_eq!(app.to_string(), "Draft\n");
+        let static_handle = handle.lock().unwrap().take().unwrap();
+        assert!(!static_handle.suspend_terminal(|| panic!("static render accepted a callback")));
+
+        let mut stream = mock_terminal_render_loop(&mut app, MockTerminalConfig::default());
+        let flag = Arc::new(WakeFlag::default());
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            stream.poll_next_unpin(&mut cx),
+            Poll::Ready(Some(_))
+        ));
+        assert!(stream.poll_next_unpin(&mut cx).is_pending());
+        assert!(!flag.0.swap(false, Relaxed));
+
+        let handle = handle.lock().unwrap().take().unwrap();
+        let other_thread = handle.clone();
+        std::thread::spawn(move || {
+            assert!(other_thread.suspend_terminal(move || closed.store(true, Relaxed)));
+        })
+        .join()
+        .unwrap();
+
+        assert!(flag.0.load(Relaxed));
+        assert!(matches!(
+            stream.poll_next_unpin(&mut cx),
+            Poll::Ready(Some(_))
+        ));
+        assert!(matches!(stream.poll_next_unpin(&mut cx), Poll::Ready(None)));
+        drop(stream);
+        assert!(!handle.suspend_terminal(|| panic!("closed loop accepted a callback")));
+    }
+
     #[component]
     fn FullWidthComponent() -> impl Into<AnyElement<'static>> {
         element! {
