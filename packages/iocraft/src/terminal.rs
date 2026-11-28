@@ -246,6 +246,22 @@ impl<'a> Terminal<'a> {
         self.inner.set_fullscreen(enabled)
     }
 
+    pub fn suspend<F: FnOnce()>(&mut self, f: F) -> io::Result<()> {
+        let previous_size = self.size();
+        let had_event_stream = self.event_stream.take().is_some();
+        let suspension = Suspension::begin(&mut *self.inner)?;
+        f();
+        suspension.finish()?;
+        if had_event_stream {
+            self.event_stream = Some(self.inner.event_stream()?);
+            self.refresh_size();
+            if let Some((width, height)) = self.size().filter(|size| Some(*size) != previous_size) {
+                self.dispatch_event(TerminalEvent::Resize(width, height));
+            }
+        }
+        Ok(())
+    }
+
     pub fn ignore_ctrl_c(&mut self) {
         self.ignore_ctrl_c = true;
     }
@@ -386,6 +402,31 @@ impl Drop for SynchronizedUpdate<'_, '_> {
     }
 }
 
+struct Suspension<'a, 'b> {
+    backend: Option<&'a mut (dyn TerminalBackend + 'b)>,
+}
+
+impl<'a, 'b> Suspension<'a, 'b> {
+    fn begin(backend: &'a mut (dyn TerminalBackend + 'b)) -> io::Result<Self> {
+        backend.suspend()?;
+        Ok(Self {
+            backend: Some(backend),
+        })
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.backend.take().unwrap().resume()
+    }
+}
+
+impl Drop for Suspension<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            let _ = backend.resume();
+        }
+    }
+}
+
 #[cfg(test)]
 mod suspension_tests {
     use super::*;
@@ -469,6 +510,64 @@ mod suspension_tests {
         assert_eq!(*calls.lock().unwrap(), ["events"]);
         drop(terminal);
         assert_eq!(*calls.lock().unwrap(), ["events", "drop input"]);
+    }
+
+    #[test]
+    fn suspension_releases_and_reclaims_terminal() {
+        let complete = [
+            "events",
+            "drop input",
+            "suspend",
+            "editor",
+            "resume",
+            "events",
+        ];
+        for (failure, expected) in [
+            ("", &complete[..]),
+            ("suspend", &complete[..3]),
+            ("resume", &complete[..5]),
+            ("events", &complete[..]),
+            ("editor", &complete[..5]),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut terminal = Terminal::with_backend(Box::new(Backend {
+                calls: Arc::clone(&calls),
+                failure,
+                ..Backend::default()
+            }));
+            terminal.events().unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                terminal.suspend(|| {
+                    calls.lock().unwrap().push("editor");
+                    assert_ne!(failure, "editor", "editor panicked");
+                })
+            }));
+            match failure {
+                "" => result.unwrap().unwrap(),
+                "editor" => assert!(result.is_err()),
+                _ => assert_eq!(result.unwrap().unwrap_err().to_string(), failure),
+            }
+            assert_eq!(*calls.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn suspension_reports_a_resize_without_waiting_for_new_input() {
+        let size = Arc::new(Mutex::new(Some((100, 24))));
+        let backend = Backend {
+            reported_size: Arc::clone(&size),
+            size: Some((100, 24)),
+            ..Backend::default()
+        };
+        let mut terminal = Terminal::with_backend(Box::new(backend));
+        let mut events = terminal.events().unwrap();
+        let mut next = || futures::FutureExt::now_or_never(events.next());
+        terminal
+            .suspend(|| *size.lock().unwrap() = Some((60, 14)))
+            .unwrap();
+        assert!(matches!(next(), Some(Some(TerminalEvent::Resize(60, 14)))));
+        terminal.suspend(|| {}).unwrap();
+        assert!(next().is_none());
     }
 }
 
