@@ -20,6 +20,7 @@ To run any of the examples, use `cargo run --example NAME`. For example, to run 
 |[scrolling.rs](./scrolling.rs)<br />Demonstrates using `ScrollView` to implement scrollable text.|![preview](./images/scrolling.png)|
 |[seekable_progress.rs](./seekable_progress.rs)<br />Uses `use_component_rect()` and local mouse events to make a progress bar clickable even when it is narrower than the terminal.|![Seekable progress bar at 43%](./images/seekable_progress.png)|
 |[table.rs](./table.rs)<br />Displays a list of users provided by reference via properties.|![preview](./images/table.png)|
+|[terminal_suspension.rs](./terminal_suspension.rs)<br />Hands the terminal to `$EDITOR`, then resumes the TUI. Run with `cargo run --example terminal_suspension -- FILE`.|![Nano during the handoff and the TUI after the editor exits](./images/terminal-suspension.png)|
 |[use_input.rs](./use_input.rs)<br />Demonstrates using keyboard input to move a 👾.|![preview](./images/use_input.png)|
 |[use_output.rs](./use_output.rs)<br />Continuously logs text output above the rendered component.|![preview](./images/use_output.png)|
 |[weather.rs](./weather.rs)<br />Demonstrates asynchronous loading of data from remote APIs in response to user input.|![preview](./images/weather.png)|
